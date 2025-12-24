@@ -10,16 +10,16 @@ from tqdm import tqdm
 from pathlib import Path
 from numpy import ndarray
 from itertools import product
-from typing import Dict, List
+from typing import Dict, List, Iterable, Tuple
 from pandas import DataFrame as df
 from joblib import Parallel, delayed
 
 
 
 def threshold_mask(
-    matrix: ndarray, 
-    threshold_percent: float | None = None, 
-    threshold_absolute: float | None = None
+        matrix: ndarray, 
+        threshold_percent: float | None = None, 
+        threshold_absolute: float | None = None
 ) -> ndarray:
     
     '''
@@ -31,13 +31,14 @@ def threshold_mask(
     
     if not threshold_percent is None and not threshold_absolute is None:
         raise ValueError('More than one threshold parameter was provided!')
-    
-    values = np.sort(matrix[np.triu(matrix) != 0]) 
 
-    if not threshold_percent is None:
+    if threshold_percent is not None:
 
         if threshold_percent > 1.0 or threshold_percent <= 0.0:
-            raise ValueError('Percentage must be in the interval (0, 1]')
+            raise ValueError(f'Percentage must be in the interval (0, 1], not {threshold_percent}')
+        
+        values = matrix[np.triu_indices(matrix.shape[0])]
+        values = np.sort(values[values >= 0])
         
         thresholded_n = math.ceil(len(values) * threshold_percent)
         threshold_absolute = values[-thresholded_n]
@@ -131,7 +132,7 @@ def pairwise_network_global_efficiencies(
     
     lengths = None
     if inverse_weights:
-        lengths = all_pairs_bellman_ford_path_length(extras.inverse_ndarray(adj_mat), weighted=weighted)
+        lengths = all_pairs_bellman_ford_path_length(extras.ndarray_reciprocal(adj_mat), weighted=weighted)
     else:
         lengths = all_pairs_bellman_ford_path_length(adj_mat, weighted=weighted)
 
@@ -146,7 +147,7 @@ def pairwise_network_global_efficiencies(
             num, den = 0.0, 0
 
             for node1, node2 in product(network1_nodes, network2_nodes):
-                num += efficiencies[node1, node2]
+                num += efficiencies[node1 - 1, node2 - 1]
                 den += 1
 
             prefix = 'Unweighted'
@@ -156,12 +157,11 @@ def pairwise_network_global_efficiencies(
             results[f'{network1_name}_{network2_name}_{prefix}_Efficiency'] = num / den
 
     return results
-            
+
 def compute_metrics(
         fc_matrix: ndarray,
         inverse_atlas: Dict[str, List[int]],
-        threshold_percent: float | None = None, 
-        threshold_absolute: float | None = None
+        threshold_percent: float
 ) -> Dict[str, int | float]:
     
     '''
@@ -172,61 +172,59 @@ def compute_metrics(
     metrics = {}
 
     abs_fc_matrix = np.abs(fc_matrix)
-    np.fill_diagonal(abs_fc_matrix, 0)
+    np.fill_diagonal(abs_fc_matrix, -1)
 
     # Intra-network efficiency
     metrics.update(pairwise_network_global_efficiencies(
-        np.where(threshold_mask(abs_fc_matrix, threshold_percent, threshold_absolute), abs_fc_matrix, 0), # weighted adjacency matrix
+        np.where(threshold_mask(abs_fc_matrix, threshold_percent), abs_fc_matrix, 0), # weighted adjacency matrix
         inverse_atlas,
         inverse_weights=True, 
         weighted=True
     ))
 
     metrics.update(pairwise_network_global_efficiencies(
-        np.where(threshold_mask(abs_fc_matrix, threshold_percent, threshold_absolute), 1, 0), # unweighted adjacency matrix
+        np.where(threshold_mask(abs_fc_matrix, threshold_percent), 1, 0), # unweighted adjacency matrix
         inverse_atlas, 
         inverse_weights=False, 
         weighted=False
     ))
+
+    inverse_atlas[''] = list(range(1, fc_matrix.shape[0] + 1))
 
     # Inter-network metrics
     for network_name, network_nodes in inverse_atlas.items():
 
         network_size = len(network_nodes)
         fc_matrix_network = abs_fc_matrix.copy()
+        nodes_to_remove = []
 
         for i in range(fc_matrix_network.shape[0]):
 
             if (i + 1) not in network_nodes:
-                fc_matrix_network[i] = 0
-                fc_matrix_network[:, i] = 0
+
+                fc_matrix_network[i] = -1
+                fc_matrix_network[:, i] = -1
+                nodes_to_remove.append(i)
         
-        thresh_mask = threshold_mask(fc_matrix_network, threshold_percent, threshold_absolute)
+        thresh_mask = threshold_mask(fc_matrix_network, threshold_percent)
         adj_matrix = np.where(thresh_mask, 1, 0)
         wgt_matrix = np.where(thresh_mask, fc_matrix_network, 0)
 
         unweighted_graph = nx.from_numpy_array(adj_matrix)
         weighted_graph = nx.from_numpy_array(wgt_matrix)
-        inverse_weighted_graph = nx.from_numpy_array(extras.inverse_ndarray(wgt_matrix))
+        inverse_weighted_graph = nx.from_numpy_array(extras.ndarray_reciprocal(wgt_matrix))
 
-        if (
-            unweighted_graph.number_of_nodes != network_size 
-            or unweighted_graph.number_of_edges < (network_size * network_size * threshold_percent)
-        ):
-            raise Exception('Game Over!')
+        unweighted_graph.remove_nodes_from(nodes_to_remove)
+        weighted_graph.remove_nodes_from(nodes_to_remove)
+        inverse_weighted_graph.remove_nodes_from(nodes_to_remove)
         
         prefix = network_name + '_'
         if network_name == '':
-            prefix = ''        
-            
-        # Density
-        metrics[prefix + 'Density'] = nx.density(unweighted_graph)    
-
-        # Components
-        metrics[prefix + 'Components'] = nx.number_connected_components(unweighted_graph)    
-
-        # Connected
-        metrics[prefix + 'Connected'] = 1 if nx.is_connected(unweighted_graph) else 0
+            prefix = '' 
+        
+        # Inter-network efficiency
+        metrics[prefix + 'Unweighted_Efficiency'] = nx.global_efficiency(unweighted_graph)
+        metrics[prefix + 'Weighted_Efficiency'] = global_efficiency(inverse_weighted_graph, weight='weight')
 
         # Degree
         degree = np.sum(adj_matrix, axis=0)
@@ -245,21 +243,14 @@ def compute_metrics(
         # Transitivity
         metrics[prefix + 'Transitivity'] = nx.transitivity(unweighted_graph)
 
-        # Inter-network efficiency
-        metrics[prefix + 'Unweighted_Efficiency'] = nx.global_efficiency(unweighted_graph)
-        metrics[prefix + 'Weighted_Efficiency'] = global_efficiency(inverse_weighted_graph, weight='weight')
-
         # Clustering
         metrics[prefix + 'Unweighted_Clustering'] = nx.average_clustering(unweighted_graph)     
         metrics[prefix + 'Weighted_Clustering'] = nx.average_clustering(weighted_graph, weight='weight')
 
         # Assortativity
-        degree_assortativity = nx.degree_assortativity_coefficient(unweighted_graph)
-        if math.isnan(degree_assortativity):
-            degree_assortativity = 0
-
-        metrics[prefix + 'Unweighted_Assortativity'] = degree_assortativity
-        metrics[prefix + 'Weighted_Assortativity'] = nx.degree_assortativity_coefficient(weighted_graph, weight='weight')
+        if network_size > 9:
+            metrics[prefix + 'Unweighted_Assortativity'] = nx.degree_assortativity_coefficient(unweighted_graph)
+            metrics[prefix + 'Weighted_Assortativity'] = nx.degree_assortativity_coefficient(weighted_graph, weight='weight')
 
         # Modularity
         metrics[prefix + 'Unweighted_Modularity'] = nx.community.modularity(
@@ -267,5 +258,43 @@ def compute_metrics(
  
         metrics[prefix + 'Weighted_Modularity'] = nx.community.modularity(
             weighted_graph, nx.community.louvain_communities(weighted_graph, weight='weight'), weight='weight')
+        
+        if network_size == fc_matrix.shape[0]:
+
+            lcc_nodes = max(nx.connected_components(unweighted_graph), key=len)
+            unweighted_lcc_graph = unweighted_graph.subgraph(lcc_nodes).copy()
+            weighted_lcc_graph = weighted_graph.subgraph(lcc_nodes).copy()
+            
+            metrics[prefix + 'LCCsize'] = len(lcc_nodes)
+            metrics[prefix + 'Components'] = nx.number_connected_components(unweighted_graph)
+
+            # Small-world (Sigma)
+            metrics[prefix + 'Smallworld'] = small_world_sigma(unweighted_lcc_graph, 10)
+
+            # Characteristic path length
+            metrics[prefix + 'Unweighted_AvgShortestPath'] = nx.average_shortest_path_length(unweighted_lcc_graph)
+            metrics[prefix + 'Weighted_AvgShortestPath'] = nx.average_shortest_path_length(weighted_lcc_graph, weight='weight')
+        
+    return metrics
 
 
+
+if __name__ == '__main__':
+
+    inverse_atlas = extras.inverse_gordon_atlas()
+    fcs, roi_vec, fc_ids = reader.readAdjustedFcMatrices(roi_names_key=None)
+    screentime_ids = reader.readScreentimeData()['participant_id'].to_numpy()
+
+    id_mask = np.isin(fc_ids, screentime_ids) # Compute only for those with screentime data
+    fcs, fc_ids = fcs[id_mask], fc_ids[id_mask]
+
+    metrics = df(Parallel(n_jobs=-1) (
+        delayed(compute_metrics)(
+            extras.reconstruct_fc_matrix(fc, roi_vec), # 2D matrix from a flat upper tri
+            inverse_atlas.copy(),
+            threshold_percent=0.1
+        ) for fc in tqdm(fcs)
+    ))
+
+    metrics.insert(0, 'participant_id', fc_ids)
+    metrics.to_csv(directories.dataDirectory.joinpath('graph_metrics.csv'), index=False)
