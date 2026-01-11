@@ -13,6 +13,9 @@ imagingDirectory.mkdir(parents=True, exist_ok=True)
 gordonDirectory = dataDirectory.joinpath('gordon333')
 gordonDirectory.mkdir(parents=True, exist_ok=True)
 
+generalDirectory = dataDirectory.joinpath('general')
+generalDirectory.mkdir(parents=True, exist_ok=True)
+
 figuresDirectory = abcdDirectory.joinpath('figures')
 figuresDirectory.mkdir(parents=True, exist_ok=True)
 
