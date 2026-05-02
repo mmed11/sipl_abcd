@@ -1,0 +1,7 @@
+Network: Size
+
+Salience: 4
+CinguloOperc: 5
+SMmouth: 8
+RetrosplenialTemporal: 8
+None: 47
