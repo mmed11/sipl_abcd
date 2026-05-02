@@ -1,0 +1,13 @@
+Default
+SMhand
+SMmouth
+Visual
+FrontoParietal
+Auditory
+CinguloParietal
+RetrosplenialTemporal
+CinguloOperc
+VentralAttn
+Salience
+DorsalAttn
+None
